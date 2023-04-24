@@ -45,45 +45,65 @@ class RLCriterion(FairseqCriterion):
         masks:   batch x len
         """
 
-        logging_output = str() #add things to log here
+        def mask_then_sample(outputs, targets, masks):
+            # masking 
+            if masks is not None:
+                outputs, targets = outputs[masks], targets[masks]
+            
+            # sampling
+            output_probs = F.softmax(outputs, dim=1)
+            sampled_indices = torch.multinomial(output_probs, num_samples=1)
+            
+            # get strings
+            sampled_string = self.task.target_dictionary.string(sampled_indices)
+            target_string = self.task.target_dictionary.string(targets)
+            
+            # scoring
+            with torch.no_grad():
+                reward = self.compute_metric([sampled_string], [[target_string]])
+            
+            # loss calculation
+            loss = torch.gather(output_probs, dim=-1, index=targets.unsqueeze(-1)).squeeze(-1)
+            loss = -loss * reward
+            loss = loss.mean()
+            
+            # (print and) return loss
+            # print(loss)
+            return loss
 
-        #padding mask, do not remove
-        if masks is not None:
-            outputs, targets = outputs[masks], targets[masks]
+      
+        def sample_then_mask(outputs, targets, masks):
+            # sampling
+            output_probs = F.softmax(outputs)
+            B, T, V = output_probs.shape[0], output_probs.shape[1], output_probs.shape[2]
+            output_probs_flat = output_probs.view(B*T, V)
+            sampled_indices_flat = torch.multinomial(output_probs_flat, num_samples=1)
+            sampled_indices = sampled_indices_flat.view(B, T)
 
-        #we take a softmax over outputs
-        output_probs = F.softmax(outputs, dim=1)
+            # get strings
+            sampled_strings = [self.task.target_dictionary.string(sentence) for sentence in sampled_indices.tolist()]
+            target_strings = [self.task.target_dictionary.string(sentence) for sentence in targets.tolist()]
+
+            # reward calculation
+            with torch.no_grad():
+                reward = self.compute_metric(sampled_strings, [target_strings])
+            
+            # masking
+            if masks is not None:
+                output_probs, targets = output_probs[masks], targets[masks]
+
+            # loss calculation
+            loss = torch.gather(output_probs, dim=-1, index=targets.unsqueeze(-1)).squeeze(-1)
+            loss = -loss * reward
+            loss = loss.mean()
+
+            # (print and) return loss
+            # print(loss)
+            return loss
+            
         
-        #argmax over the softmax \ sampling (e.g. multinomial)
-        #sampled_sentence = [4, 17, 18, 19, 20]
-        sampled_indices = torch.multinomial(output_probs, num_samples=1) # sampling, not argmax (research question?)
-        
-        #sampled_sentence_string = tgt_dict.string([4, 17, 18, 19, 20])
-        #see dictionary class of fairseq
-        sampled_text = self.task.target_dictionary.string(sampled_indices)
-        
-        #target_sentence = "I am a sentence"
-        target_text = self.task.target_dictionary.string(targets)
-
-        #with torch.no_grad()
-            #R(*) = eval_metric(sampled_sentence_string, target_sentence)
-            #R(*) is a number, BLEU, сhrf, etc.
-
-        # we calculate the metric once per batch (there is only one "corpus string" in the batch)
-        with torch.no_grad():
-          score = self.compute_metric([sampled_text], [[target_text]])
-        
-        loss = torch.gather(output_probs, dim=-1, index=targets.unsqueeze(-1)).squeeze(-1)
-        print(loss.shape) # the shape should be num_tokens x 1 (the number being the loss of a token)
-        loss = loss.mean()
-        print(loss)
-
-        sample_size = 1
-
-        #import sys
-        #sys.exit(0)
-
-        return loss
+        #return mask_then_sample(outputs, targets, masks)
+        return sample_then_mask(outputs, targets, masks)
 
     def forward(self, model, sample, reduce=True):
         """Compute the loss for the given sample.
