@@ -12,6 +12,11 @@ from fairseq.logging import metrics
 
 from dataclasses import dataclass, field
 
+import wandb
+
+#from torch.utils.tensorboard import SummaryWriter
+#writer = SummaryWriter()
+
 @dataclass
 class RLCriterionConfig(FairseqDataclass):
     sentence_level_metric: str = field(default="bleu",
@@ -63,13 +68,13 @@ class RLCriterion(FairseqCriterion):
                 reward = self.compute_metric([sampled_string], [[target_string]])
             
             # loss calculation
-            loss = torch.gather(output_probs, dim=-1, index=targets.unsqueeze(-1)).squeeze(-1)
-            loss = -loss * reward
+            log_probs = torch.log(output_probs)
+            log_probs_of_samples = torch.gather(log_probs, dim=-1, index=targets.unsqueeze(-1)).squeeze(-1)
+            loss = -log_probs_of_samples * reward
             loss = loss.mean()
             
-            # (print and) return loss
-            # print(loss)
-            return loss
+            # return loss
+            return loss, reward
 
       
         def sample_then_mask(outputs, targets, masks):
@@ -91,19 +96,20 @@ class RLCriterion(FairseqCriterion):
             # masking
             if masks is not None:
                 output_probs, targets = output_probs[masks], targets[masks]
-
+                sampled_indices = sampled_indices[masks]
+            
             # loss calculation
-            loss = torch.gather(output_probs, dim=-1, index=targets.unsqueeze(-1)).squeeze(-1)
-            loss = -loss * reward
+            log_probs = torch.log(output_probs)
+            log_probs_of_samples = torch.gather(log_probs, dim=-1, index=targets.unsqueeze(-1)).squeeze(-1)
+            loss = -log_probs_of_samples * reward
             loss = loss.mean()
 
-            # (print and) return loss
-            # print(loss)
-            return loss
+            # return loss
+            return loss, reward
             
         
-        #return mask_then_sample(outputs, targets, masks)
-        return sample_then_mask(outputs, targets, masks)
+        return mask_then_sample(outputs, targets, masks)
+        #return sample_then_mask(outputs, targets, masks)
 
     def forward(self, model, sample, reduce=True):
         """Compute the loss for the given sample.
@@ -126,7 +132,7 @@ class RLCriterion(FairseqCriterion):
         outs = outputs["word_ins"].get("out", None)
         masks = outputs["word_ins"].get("mask", None)
 
-        loss = self._compute_loss(outs, tgt_tokens, masks)
+        loss, reward = self._compute_loss(outs, tgt_tokens, masks)
 
         # NOTE:
         # we don't need to use sample_size as denominator for the gradient
@@ -138,6 +144,7 @@ class RLCriterion(FairseqCriterion):
             "ntokens": ntokens,
             "nsentences": nsentences,
             "sample_size": sample_size,
+            "reward": reward
         }
 
         return loss, sample_size, logging_output
@@ -148,11 +155,17 @@ class RLCriterion(FairseqCriterion):
         loss_sum = sum(log.get("loss", 0) for log in logging_outputs)
         ntokens = sum(log.get("ntokens", 0) for log in logging_outputs)
         sample_size = sum(log.get("sample_size", 0) for log in logging_outputs)
+        reward_sum = sum(log.get("reward", 0) for log in logging_outputs)
 
         # we divide by log(2) to convert the loss from base e to base 2
         metrics.log_scalar(
             "loss", loss_sum / sample_size / math.log(2), sample_size, round=3
         )
+
+        loss = loss_sum / sample_size / math.log(2)
+        reward = reward_sum / sample_size
+        wandb.log({"loss": loss, "reward": reward})
+
         if sample_size != ntokens:
             metrics.log_scalar(
                 "nll_loss", loss_sum / ntokens / math.log(2), ntokens, round=3
