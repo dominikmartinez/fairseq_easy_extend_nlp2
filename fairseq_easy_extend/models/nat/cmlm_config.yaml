@@ -7,7 +7,6 @@ task:
   noise: random_mask
 criterion:
   _name: rl_loss
-  sentence_level_metric: BLEU
 model:
   _name: cmlm_transformer_base
   share_decoder_input_output_embed: true
@@ -31,7 +30,7 @@ dataset:
 optimization:
   lr: [0.0005]
   update_freq: [8]
-  max_update: 200
+  max_update: 1000
   stop_min_lr: 1e-09
 checkpoint:
   no_epoch_checkpoints: true
